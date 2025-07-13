@@ -120,21 +120,39 @@ def get_patients(db: Session = Depends(get_db)):
 
 @app.get("/api/messages/{patient_id}")
 def get_messages_for_patient(patient_id: int, db: Session = Depends(get_db)):
-    """ Retorna todas as mensagens de um paciente específico. """
-    # ### MUDANÇA SUTIL ###
-    # Vamos marcar os alertas como "lidos" (has_alert = false) quando o profissional os visualiza.
-    # NOTA: Esta é uma implementação simples. Um sistema real teria uma flag "read".
-    
-    messages = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
-    
-    # Marca todos os alertas como lidos após buscá-los
+    """
+    Busca todas as mensagens de um paciente, retorna os dados e, em seguida,
+    marca os alertas como lidos no banco de dados.
+    """
+    # 1. Busca os objetos de mensagem do banco de dados.
+    messages_from_db = db.query(models.Message).filter(
+        models.Message.patient_id == patient_id
+    ).order_by(models.Message.timestamp.asc()).all()
+
+    # 2. ### A CORREÇÃO CRÍTICA ###
+    # Converte manualmente os objetos do SQLAlchemy para um dicionário Python simples.
+    # Isso garante que o FastAPI possa lê-los e transformá-los em JSON corretamente.
+    response_data = [
+        {
+            "id": msg.id,
+            "text": msg.text,
+            "sender": msg.sender,
+            "timestamp": msg.timestamp.isoformat() # .isoformat() converte o objeto de data para texto
+        }
+        for msg in messages_from_db
+    ]
+
+    # 3. Agora que já preparamos a resposta, atualizamos o banco de dados.
+    # Esta operação não afetará a 'response_data' que já está na memória.
     db.query(models.Message).filter(
         models.Message.patient_id == patient_id,
         models.Message.has_alert == True
-    ).update({"has_alert": False})
+    ).update({"has_alert": False}, synchronize_session=False)
     db.commit()
     
-    return messages
+    # 4. Retorna a lista de dicionários, que o FastAPI converterá em JSON.
+    return response_data
+
 
 # ### MUDANÇA - FIM ###
 
