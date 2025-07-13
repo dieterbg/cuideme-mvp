@@ -171,3 +171,33 @@ def verify_webhook(request: Request):
     else:
         raise HTTPException(status_code=403, detail="Verification token mismatch")
 
+# Adicione este código antes do @app.get("/")
+
+# ### NOVO - INÍCIO (Alternativa Gratuita para Cron Job) ###
+from fastapi import Header, HTTPException
+from typing import Annotated
+from send_scheduled_messages import run_task # Importa nossa função de envio
+
+# Carrega o token secreto que vamos configurar no Render
+CRON_SECRET = os.getenv("CRON_SECRET")
+
+@app.post("/trigger-daily-task")
+async def trigger_task(
+    x_cron_secret: Annotated[str | None, Header()] = None
+):
+    """
+    Endpoint secreto para ser chamado pelo GitHub Actions.
+    Ele executa a tarefa de envio de mensagens.
+    """
+    print("Endpoint /trigger-daily-task chamado.")
+    if not CRON_SECRET or x_cron_secret != CRON_SECRET:
+        print("ERRO: Token secreto do Cron inválido ou ausente.")
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    print("Token secreto validado. Iniciando a tarefa em segundo plano...")
+    # Idealmente, isso rodaria em background, mas para o MVP vamos rodar direto.
+    run_task()
+    
+    return {"status": "Task triggered successfully"}
+
+# ### NOVO - FIM ###
