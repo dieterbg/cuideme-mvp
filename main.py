@@ -21,6 +21,18 @@ from send_scheduled_messages import run_task
 # O Render executará isso sempre que o serviço for iniciado.
 models.Base.metadata.create_all(bind=engine)
 
+# ... outros imports
+from database.database import engine, get_db
+
+# Adiciona a linha para apagar as tabelas antes de recriá-las.
+# Isso vai limpar completamente seu banco de dados.
+models.Base.metadata.drop_all(bind=engine)
+models.Base.metadata.create_all(bind=engine)
+
+# --- Configuração Inicial ---
+# ... o resto do seu código continua aqui
+
+
 
 # --- Configuração das Variáveis de Ambiente ---
 # Carrega os segredos configurados no ambiente do Render
