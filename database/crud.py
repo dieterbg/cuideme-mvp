@@ -23,3 +23,8 @@ def create_message(db: Session, patient_id: int, text: str, has_alert: bool):
     db.commit()
     db.refresh(db_message)
     return db_message
+# Adicione esta função no final do arquivo database/crud.py, se ela não estiver lá
+
+def get_all_patients(db: Session):
+    """ Retorna todos os pacientes cadastrados no banco de dados. """
+    return db.query(models.Patient).all()
