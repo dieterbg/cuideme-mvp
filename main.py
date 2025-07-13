@@ -26,7 +26,6 @@ from database.database import engine, get_db
 
 # Adiciona a linha para apagar as tabelas antes de recriá-las.
 # Isso vai limpar completamente seu banco de dados.
-models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
 
 # --- Configuração Inicial ---
