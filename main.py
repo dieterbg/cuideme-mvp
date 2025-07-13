@@ -19,6 +19,7 @@ from send_scheduled_messages import run_task
 # --- Inicialização do Banco de Dados ---
 # Esta linha cria as tabelas no banco de dados (patients, messages ) se elas não existirem.
 # O Render executará isso sempre que o serviço for iniciado.
+models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
 
 # ... outros imports
