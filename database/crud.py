@@ -2,7 +2,9 @@ from sqlalchemy.orm import Session
 from . import models
 
 def get_or_create_patient(db: Session, phone_number: str):
-    """ Busca um paciente pelo número. Se não existir, cria um novo. """
+    """
+    Busca um paciente pelo número de telefone. Se não existir, cria um novo.
+    """
     patient = db.query(models.Patient).filter(models.Patient.phone_number == phone_number).first()
     if not patient:
         patient = models.Patient(phone_number=phone_number)
@@ -11,20 +13,25 @@ def get_or_create_patient(db: Session, phone_number: str):
         db.refresh(patient)
     return patient
 
-def create_message(db: Session, patient_id: int, text: str, has_alert: bool):
-    """ Salva uma nova mensagem no banco de dados. """
+# ### FUNÇÃO CORRIGIDA ###
+def create_message(db: Session, patient_id: int, text: str, has_alert: bool, sender: str = "patient"):
+    """
+    Cria e salva uma nova mensagem no banco de dados.
+    O parâmetro 'sender' agora é aceito. O valor padrão é 'patient'.
+    """
     db_message = models.Message(
         patient_id=patient_id,
         text=text,
         has_alert=has_alert,
-        sender="patient"
+        sender=sender  # A linha que usa o novo argumento
     )
     db.add(db_message)
     db.commit()
     db.refresh(db_message)
     return db_message
-# Adicione esta função no final do arquivo database/crud.py, se ela não estiver lá
 
 def get_all_patients(db: Session):
-    """ Retorna todos os pacientes cadastrados no banco de dados. """
+    """
+    Retorna todos os pacientes do banco de dados.
+    """
     return db.query(models.Patient).all()
