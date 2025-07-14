@@ -8,9 +8,15 @@ class Patient(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     phone_number = Column(String, unique=True, index=True, nullable=False)
-    name = Column(String, nullable=True) # O nome pode ser adicionado depois
+    name = Column(String, nullable=True)
+    
+    # ### NOVO CAMPO ###
+    # Define o modo de operação para este paciente.
+    # 'automatico' (padrão) ou 'manual'
+    status = Column(String, default="automatico", nullable=False)
     
     messages = relationship("Message", back_populates="patient")
+
 
 class Message(Base):
     __tablename__ = "messages"
