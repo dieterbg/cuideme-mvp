@@ -17,20 +17,8 @@ from database.database import engine, get_db
 from send_scheduled_messages import run_task
 
 # --- Inicialização do Banco de Dados ---
-
-
+# A linha a seguir garante que as tabelas sejam criadas com base nos seus modelos.
 models.Base.metadata.create_all(bind=engine)
-
-# ... outros imports
-from database.database import engine, get_db
-
-# Adiciona a linha para apagar as tabelas antes de recriá-las.
-# Isso vai limpar completamente seu banco de dados.
-models.Base.metadata.create_all(bind=engine)
-
-# --- Configuração Inicial ---
-# ... o resto do seu código continua aqui
-
 
 
 # --- Configuração das Variáveis de Ambiente ---
@@ -228,4 +216,3 @@ def verify_webhook(request: Request):
     else:
         print("ERRO DE VERIFICAÇÃO DO WEBHOOK")
         raise HTTPException(status_code=403, detail="Verification token mismatch")
-
