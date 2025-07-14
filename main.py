@@ -181,6 +181,59 @@ def release_conversation_control(patient_id: int, db: Session = Depends(get_db))
     print(f"Controle da conversa liberado para o paciente {patient_id}. Status: automatico.")
     return {"status": "success", "message": "Controle automático reativado."}
 
+# ... (outros imports e código) ...
+
+# ### NOVO MODELO PYDANTIC ###
+# Define a estrutura que esperamos receber do frontend ao enviar uma mensagem
+class MessageSendRequest(BaseModel):
+    text: str
+
+# ... (código dos outros endpoints) ...
+
+# ### NOVO ENDPOINT DE ENVIO ###
+@app.post("/api/messages/send/{patient_id}", status_code=201)
+def send_message_to_patient(patient_id: int, message_request: MessageSendRequest, db: Session = Depends(get_db)):
+    """ Envia uma mensagem do profissional para o paciente via WhatsApp. """
+    
+    # 1. Encontra o paciente para obter o número de telefone
+    patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Paciente não encontrado")
+
+    # 2. Prepara a chamada para a API do WhatsApp
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    data = {
+        "messaging_product": "whatsapp",
+        "to": patient.phone_number,
+        "type": "text",
+        "text": {"body": message_request.text},
+    }
+
+    # 3. Envia a mensagem usando a biblioteca httpx
+    try:
+        with httpx.Client( ) as client:
+            response = client.post(url, headers=headers, json=data)
+            response.raise_for_status() # Levanta um erro se a resposta for 4xx ou 5xx
+    except httpx.HTTPStatusError as e:
+        print(f"Erro ao enviar mensagem para {patient.phone_number}: {e.response.status_code}" )
+        print(f"Detalhe do erro: {e.response.text}")
+        raise HTTPException(status_code=500, detail=f"Erro na API do WhatsApp: {e.response.text}")
+
+    # 4. Se o envio foi bem-sucedido, salva a mensagem no nosso banco de dados
+    # O remetente é 'professional' para podermos estilizá-la de forma diferente no frontend
+    new_message = crud.create_message(
+        db=db,
+        patient_id=patient.id,
+        text=message_request.text,
+        sender="professional" # Marcamos que esta mensagem veio do profissional
+    )
+    print(f"Mensagem do profissional para o paciente {patient.id} salva no banco.")
+
+    return new_message # Retorna a mensagem recém-criada para o frontend
 
 # --- Endpoint para Disparo da Tarefa Agendada ---
 
