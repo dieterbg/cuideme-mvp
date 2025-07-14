@@ -6,45 +6,29 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from typing import List, Annotated
 
-# Importa o middleware de CORS para permitir a comunicação com o frontend
 from fastapi.middleware.cors import CORSMiddleware
-
-# Importa nossos módulos de banco de dados
 from database import crud, models
 from database.database import engine, get_db
-
-# Importa a função de envio de mensagens do nosso script de automação
 from send_scheduled_messages import run_task
 
-# --- Inicialização do Banco de Dados ---
-# A linha a seguir garante que as tabelas sejam criadas com base nos seus modelos.
-models.Base.metadata.create_all(bind=engine)
+models.Base.metadata.create_all(bind=engine )
 
-
-# --- Configuração das Variáveis de Ambiente ---
-# Carrega os segredos configurados no ambiente do Render
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
-CRON_SECRET = os.getenv("CRON_SECRET") # Token para proteger o endpoint do Cron Job
+CRON_SECRET = os.getenv("CRON_SECRET")
 
-# Palavras-chave para o sistema de alerta simples
 ALERT_KEYWORDS = ["dor", "febre", "difícil", "não tomei", "sem dormir", "ansioso", "triste"]
 
-
-# --- Inicialização do Aplicativo FastAPI ---
 app = FastAPI(
     title="Cuide.me Backend",
     description="API para o Sistema de Acompanhamento Inteligente de Pacientes.",
-    version="0.3.0"
+    version="0.3.1" # Versão incrementada
 )
 
-
-# --- Configuração do CORS ---
-# Define quais origens (sites) têm permissão para acessar esta API.
 origins = [
-    "https://cuideme-painel.onrender.com", # URL do nosso frontend de produção
-    "http://localhost:5173",             # URL para desenvolvimento local do frontend
+    "https://cuideme-painel.onrender.com",
+    "http://localhost:5173",
 ]
 
 app.add_middleware(
@@ -55,29 +39,22 @@ app.add_middleware(
     allow_headers=["*"],
  )
 
-
-# --- Modelos Pydantic para Respostas da API ---
-# Definem a "forma" dos dados que nossa API enviará para o frontend, garantindo consistência.
+class MessageSendRequest(BaseModel):
+    text: str
 
 class PatientResponse(BaseModel):
     id: int
     phone_number: str
     name: str | None = None
     has_alert: bool = False
-    status: str # 'automatico' ou 'manual'
-
-    # Configuração para permitir que o Pydantic leia dados de objetos SQLAlchemy
+    status: str
     model_config = ConfigDict(from_attributes=True)
 
-
-# --- Webhook do WhatsApp ---
-# Este endpoint é o ponto de entrada para todas as mensagens enviadas pelos pacientes.
 @app.post("/webhook")
 async def handle_webhook(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
     print("--- MENSAGEM RECEBIDA ---")
     print(json.dumps(data, indent=2))
-
     try:
         if (
             data.get("entry") and
@@ -88,43 +65,25 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             message_data = data["entry"][0]["changes"][0]["value"]["messages"][0]
             from_number = message_data["from"]
             message_text = message_data["text"]["body"]
-
-            # 1. Encontra ou cria o paciente no banco de dados
             patient = crud.get_or_create_patient(db, phone_number=from_number)
-            print(f"Paciente ID {patient.id} ({patient.phone_number}) identificado/criado.")
-
-            # 2. Analisa a mensagem em busca de alertas
             lower_message_text = message_text.lower()
             found_keywords = [keyword for keyword in ALERT_KEYWORDS if keyword in lower_message_text]
             has_alert = bool(found_keywords)
-
-            if has_alert:
-                print(f"!!! ALERTA GERADO !!! Motivo: {', '.join(found_keywords)}")
-
-            # 3. Salva a mensagem no banco de dados
-            crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert)
-            print(f"Mensagem salva no banco de dados com status de alerta: {has_alert}")
-
+            crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient") # Garante que o remetente é 'patient'
         return {"status": "ok"}
     except Exception as e:
         print(f"Erro ao processar a mensagem: {e}")
         return {"status": "error", "detail": str(e)}
 
-
-# --- Endpoints da API para o Frontend ---
-
 @app.get("/api/patients", response_model=List[PatientResponse])
 def get_patients(db: Session = Depends(get_db)):
-    """ Retorna uma lista de todos os pacientes, incluindo o status de alerta e de controle. """
     all_patients = db.query(models.Patient).all()
-    
     response_patients = []
     for patient in all_patients:
         has_alert = db.query(models.Message).filter(
             models.Message.patient_id == patient.id,
             models.Message.has_alert == True
         ).first() is not None
-
         response_patients.append({
             "id": patient.id,
             "phone_number": patient.phone_number,
@@ -132,140 +91,96 @@ def get_patients(db: Session = Depends(get_db)):
             "has_alert": has_alert,
             "status": patient.status
         })
-        
     return response_patients
 
 @app.get("/api/messages/{patient_id}")
 def get_messages_for_patient(patient_id: int, db: Session = Depends(get_db)):
-    """ Busca as mensagens de um paciente e marca os alertas como lidos. """
     messages_from_db = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
-
     response_data = [
         {"id": msg.id, "text": msg.text, "sender": msg.sender, "timestamp": msg.timestamp.isoformat()}
         for msg in messages_from_db
     ]
-
-    # Marca os alertas como "lidos" após a busca
     db.query(models.Message).filter(
         models.Message.patient_id == patient_id,
         models.Message.has_alert == True
     ).update({"has_alert": False}, synchronize_session=False)
     db.commit()
-    
     return response_data
-
-
-# --- Endpoints de Controle da Conversa ---
 
 @app.post("/api/patients/{patient_id}/assume-control", status_code=200)
 def assume_conversation_control(patient_id: int, db: Session = Depends(get_db)):
-    """ Muda o status do paciente para 'manual'. """
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Paciente não encontrado")
-    
     patient.status = "manual"
     db.commit()
-    print(f"Controle da conversa assumido para o paciente {patient_id}. Status: manual.")
     return {"status": "success", "message": "Controle manual ativado."}
 
 @app.post("/api/patients/{patient_id}/release-control", status_code=200)
 def release_conversation_control(patient_id: int, db: Session = Depends(get_db)):
-    """ Muda o status do paciente de volta para 'automatico'. """
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Paciente não encontrado")
-        
     patient.status = "automatico"
     db.commit()
-    print(f"Controle da conversa liberado para o paciente {patient_id}. Status: automatico.")
     return {"status": "success", "message": "Controle automático reativado."}
 
-# ... (outros imports e código) ...
-
-# ### NOVO MODELO PYDANTIC ###
-# Define a estrutura que esperamos receber do frontend ao enviar uma mensagem
-class MessageSendRequest(BaseModel):
-    text: str
-
-# ... (código dos outros endpoints) ...
-
-# ### NOVO ENDPOINT DE ENVIO ###
+# ### ENDPOINT DE ENVIO CORRIGIDO ###
 @app.post("/api/messages/send/{patient_id}", status_code=201)
 def send_message_to_patient(patient_id: int, message_request: MessageSendRequest, db: Session = Depends(get_db)):
-    """ Envia uma mensagem do profissional para o paciente via WhatsApp. """
-    
-    # 1. Encontra o paciente para obter o número de telefone
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Paciente não encontrado")
 
-    # 2. Prepara a chamada para a API do WhatsApp
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
-    headers = {
-        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    data = {
-        "messaging_product": "whatsapp",
-        "to": patient.phone_number,
-        "type": "text",
-        "text": {"body": message_request.text},
-    }
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    data = {"messaging_product": "whatsapp", "to": patient.phone_number, "type": "text", "text": {"body": message_request.text}}
 
-    # 3. Envia a mensagem usando a biblioteca httpx
     try:
         with httpx.Client( ) as client:
             response = client.post(url, headers=headers, json=data)
-            response.raise_for_status() # Levanta um erro se a resposta for 4xx ou 5xx
+            response.raise_for_status()
     except httpx.HTTPStatusError as e:
         print(f"Erro ao enviar mensagem para {patient.phone_number}: {e.response.status_code}" )
         print(f"Detalhe do erro: {e.response.text}")
         raise HTTPException(status_code=500, detail=f"Erro na API do WhatsApp: {e.response.text}")
 
-    # 4. Se o envio foi bem-sucedido, salva a mensagem no nosso banco de dados
-    # O remetente é 'professional' para podermos estilizá-la de forma diferente no frontend
+    # A CORREÇÃO ESTÁ AQUI:
+    # Garantimos que a mensagem é salva com o remetente 'professional'
     new_message = crud.create_message(
         db=db,
         patient_id=patient.id,
         text=message_request.text,
-        sender="professional" # Marcamos que esta mensagem veio do profissional
+        sender="professional", # Marcamos explicitamente o remetente
+        has_alert=False # Mensagens do profissional não geram alerta
     )
     print(f"Mensagem do profissional para o paciente {patient.id} salva no banco.")
-
-    return new_message # Retorna a mensagem recém-criada para o frontend
-
-# --- Endpoint para Disparo da Tarefa Agendada ---
+    
+    # Retornamos um dicionário com os dados da mensagem para o frontend
+    return {
+        "id": new_message.id,
+        "text": new_message.text,
+        "sender": new_message.sender,
+        "timestamp": new_message.timestamp.isoformat()
+    }
 
 @app.post("/trigger-daily-task")
 async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
-    """ Endpoint secreto para ser chamado pelo GitHub Actions para executar a tarefa de envio. """
-    print("Endpoint /trigger-daily-task chamado.")
     if not CRON_SECRET or x_cron_secret != CRON_SECRET:
-        print("ERRO: Token secreto do Cron inválido ou ausente.")
         raise HTTPException(status_code=401, detail="Unauthorized")
-    
-    print("Token secreto validado. Iniciando a tarefa...")
     run_task()
     return {"status": "Task triggered successfully"}
 
-
-# --- Endpoints de Verificação ---
-
 @app.get("/")
 def read_root():
-    """ Endpoint inicial para verificar se a API está no ar. """
     return {"status": "API do Cuide.me (Fase 3) está funcionando!"}
 
 @app.get("/webhook")
 def verify_webhook(request: Request):
-    """ Endpoint usado pelo WhatsApp para verificar a autenticidade do webhook. """
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
     challenge = request.query_params.get("hub.challenge")
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("WEBHOOK_VERIFIED")
         return int(challenge)
     else:
-        print("ERRO DE VERIFICAÇÃO DO WEBHOOK")
         raise HTTPException(status_code=403, detail="Verification token mismatch")
