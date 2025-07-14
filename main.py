@@ -1,7 +1,7 @@
 import os
 import json
 import httpx
-from fastapi import FastAPI, Request, HTTPException, Depends, Header
+from fastapi import FastAPI, Request, HTTPException, Depends, Header, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from typing import List, Annotated
@@ -11,8 +11,37 @@ from database import crud, models
 from database.database import engine, get_db
 from send_scheduled_messages import run_task
 
-models.Base.metadata.create_all(bind=engine )
+# ### NOVO ### - Gerenciador de Conexões WebSocket
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[int, list[WebSocket]] = {}
 
+    async def connect(self, websocket: WebSocket, patient_id: int):
+        await websocket.accept()
+        if patient_id not in self.active_connections:
+            self.active_connections[patient_id] = []
+        self.active_connections[patient_id].append(websocket)
+        print(f"Nova conexão WebSocket para o paciente {patient_id}.")
+
+    def disconnect(self, websocket: WebSocket, patient_id: int):
+        if patient_id in self.active_connections:
+            self.active_connections[patient_id].remove(websocket)
+            if not self.active_connections[patient_id]:
+                del self.active_connections[patient_id]
+            print(f"Conexão WebSocket fechada para o paciente {patient_id}.")
+
+    async def broadcast_to_patient_viewers(self, patient_id: int, message: dict):
+        if patient_id in self.active_connections:
+            for connection in self.active_connections[patient_id]:
+                await connection.send_json(message)
+                print(f"Mensagem enviada via WebSocket para observadores do paciente {patient_id}.")
+
+manager = ConnectionManager()
+# ##########
+
+models.Base.metadata.create_all(bind=engine)
+
+# ... (variáveis de ambiente e configuração do app permanecem as mesmas)
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
@@ -23,7 +52,7 @@ ALERT_KEYWORDS = ["dor", "febre", "difícil", "não tomei", "sem dormir", "ansio
 app = FastAPI(
     title="Cuide.me Backend",
     description="API para o Sistema de Acompanhamento Inteligente de Pacientes.",
-    version="0.3.1" # Versão incrementada
+    version="0.4.0"
 )
 
 origins = [
@@ -39,6 +68,7 @@ app.add_middleware(
     allow_headers=["*"],
  )
 
+# ... (Pydantic models e outros endpoints permanecem os mesmos)
 class MessageSendRequest(BaseModel):
     text: str
 
@@ -50,6 +80,7 @@ class PatientResponse(BaseModel):
     status: str
     model_config = ConfigDict(from_attributes=True)
 
+# ### ENDPOINT WEBHOOK MODIFICADO ###
 @app.post("/webhook")
 async def handle_webhook(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
@@ -65,16 +96,42 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             message_data = data["entry"][0]["changes"][0]["value"]["messages"][0]
             from_number = message_data["from"]
             message_text = message_data["text"]["body"]
+            
             patient = crud.get_or_create_patient(db, phone_number=from_number)
+            
             lower_message_text = message_text.lower()
             found_keywords = [keyword for keyword in ALERT_KEYWORDS if keyword in lower_message_text]
             has_alert = bool(found_keywords)
-            crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient") # Garante que o remetente é 'patient'
+            
+            # Salva a mensagem no banco
+            new_message = crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient")
+
+            # ### MUDANÇA ### - Envia a nova mensagem para o frontend via WebSocket
+            message_dict = {
+                "id": new_message.id,
+                "text": new_message.text,
+                "sender": new_message.sender,
+                "timestamp": new_message.timestamp.isoformat()
+            }
+            await manager.broadcast_to_patient_viewers(patient.id, message_dict)
+            
         return {"status": "ok"}
     except Exception as e:
         print(f"Erro ao processar a mensagem: {e}")
         return {"status": "error", "detail": str(e)}
 
+# ### NOVO ENDPOINT WEBSOCKET ###
+@app.websocket("/ws/{patient_id}")
+async def websocket_endpoint(websocket: WebSocket, patient_id: int):
+    await manager.connect(websocket, patient_id)
+    try:
+        while True:
+            # Mantém a conexão aberta. Pode ser usado para comunicação bidirecional no futuro.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, patient_id)
+
+# ... (o restante do arquivo main.py continua igual)
 @app.get("/api/patients", response_model=List[PatientResponse])
 def get_patients(db: Session = Depends(get_db)):
     all_patients = db.query(models.Patient).all()
@@ -125,7 +182,6 @@ def release_conversation_control(patient_id: int, db: Session = Depends(get_db))
     db.commit()
     return {"status": "success", "message": "Controle automático reativado."}
 
-# ### ENDPOINT DE ENVIO CORRIGIDO ###
 @app.post("/api/messages/send/{patient_id}", status_code=201)
 def send_message_to_patient(patient_id: int, message_request: MessageSendRequest, db: Session = Depends(get_db)):
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
@@ -145,18 +201,15 @@ def send_message_to_patient(patient_id: int, message_request: MessageSendRequest
         print(f"Detalhe do erro: {e.response.text}")
         raise HTTPException(status_code=500, detail=f"Erro na API do WhatsApp: {e.response.text}")
 
-    # A CORREÇÃO ESTÁ AQUI:
-    # Garantimos que a mensagem é salva com o remetente 'professional'
     new_message = crud.create_message(
         db=db,
         patient_id=patient.id,
         text=message_request.text,
-        sender="professional", # Marcamos explicitamente o remetente
-        has_alert=False # Mensagens do profissional não geram alerta
+        sender="professional", 
+        has_alert=False 
     )
     print(f"Mensagem do profissional para o paciente {patient.id} salva no banco.")
     
-    # Retornamos um dicionário com os dados da mensagem para o frontend
     return {
         "id": new_message.id,
         "text": new_message.text,
