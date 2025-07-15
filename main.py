@@ -5,29 +5,32 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Header, WebSocket,
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from typing import List, Annotated
-import openai # NOVO
+import openai 
 
 from fastapi.middleware.cors import CORSMiddleware
 from database import crud, models
 from database.database import engine, get_db
 from send_scheduled_messages import run_task
 
-# Gerenciador de Conexões WebSocket (sem alterações)
+# Gerenciador de Conexões WebSocket
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, list[WebSocket]] = {}
+
     async def connect(self, websocket: WebSocket, patient_id: int):
         await websocket.accept()
         if patient_id not in self.active_connections:
             self.active_connections[patient_id] = []
         self.active_connections[patient_id].append(websocket)
         print(f"Nova conexão WebSocket para o paciente {patient_id}.")
+
     def disconnect(self, websocket: WebSocket, patient_id: int):
         if patient_id in self.active_connections:
             self.active_connections[patient_id].remove(websocket)
             if not self.active_connections[patient_id]:
                 del self.active_connections[patient_id]
             print(f"Conexão WebSocket fechada para o paciente {patient_id}.")
+
     async def broadcast_to_patient_viewers(self, patient_id: int, message: dict):
         if patient_id in self.active_connections:
             for connection in self.active_connections[patient_id]:
@@ -42,7 +45,7 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 CRON_SECRET = os.getenv("CRON_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # NOVO
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Inicialização do Cliente OpenAI
 if OPENAI_API_KEY:
@@ -57,10 +60,10 @@ ALERT_KEYWORDS = ["dor", "febre", "difícil", "não tomei", "sem dormir", "ansio
 app = FastAPI(
     title="Cuide.me Backend",
     description="API para o Sistema de Acompanhamento Inteligente de Pacientes.",
-    version="0.5.0" # Versão incrementada
+    version="0.5.1" # Versão incrementada
 )
 
-# CORS (sem alterações)
+# CORS
 origins = [
     "https://cuideme-painel.onrender.com",
     "http://localhost:5173",
@@ -73,59 +76,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ... (Endpoints existentes permanecem os mesmos até o final)
+# Modelos Pydantic
+class MessageSendRequest(BaseModel):
+    text: str
 
-# ### NOVO ENDPOINT DE SUMARIZAÇÃO COM IA ###
-@app.post("/api/messages/{patient_id}/summarize")
-def summarize_conversation(patient_id: int, db: Session = Depends(get_db)):
-    if not client:
-        raise HTTPException(status_code=503, detail="A funcionalidade de IA não está configurada no servidor.")
+class PatientResponse(BaseModel):
+    id: int
+    phone_number: str
+    name: str | None = None
+    has_alert: bool = False
+    status: str
+    model_config = ConfigDict(from_attributes=True)
 
-    messages = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
-    if not messages:
-        raise HTTPException(status_code=404, detail="Nenhuma mensagem encontrada para este paciente.")
+# Endpoints da API
 
-    # Formata a conversa para enviar à IA
-    conversation_text = ""
-    for msg in messages:
-        # Simplifica o nome do remetente para a IA
-        sender_name = "Profissional" if msg.sender == 'professional' else "Paciente"
-        conversation_text += f"{sender_name}: {msg.text}\n"
-
-    # Cria o prompt para a IA
-    system_prompt = (
-        "Você é um assistente de saúde inteligente. Sua tarefa é resumir a seguinte conversa "
-        "entre um paciente em tratamento e um profissional de saúde. O resumo deve ser conciso, "
-        "útil e focado nos aspectos clínicos e comportamentais."
-    )
-    user_prompt = (
-        "Por favor, resuma a conversa abaixo em bullet points, focando em: "
-        "1. Evolução de sintomas ou queixas. "
-        "2. Adesão ao tratamento (medicamentos, dieta, exercícios). "
-        "3. Efeitos colaterais mencionados. "
-        "4. Estado emocional ou humor geral relatado. "
-        "5. Dados numéricos específicos reportados (peso, pressão, etc.). "
-        "Não invente informações e seja direto ao ponto.\n\n"
-        f"--- CONVERSA ---\n{conversation_text}"
-    )
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",  # Modelo poderoso para resumos de qualidade
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-        )
-        summary = response.choices[0].message.content
-        return {"summary": summary}
-    except Exception as e:
-        print(f"Erro na API da OpenAI: {e}")
-        raise HTTPException(status_code=500, detail="Ocorreu um erro ao gerar o resumo.")
-# #######################################################
-
-# (Cole aqui o restante dos seus endpoints, de /webhook até o final, sem alterações)
-# ...
 @app.post("/webhook")
 async def handle_webhook(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
@@ -148,10 +112,8 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             found_keywords = [keyword for keyword in ALERT_KEYWORDS if keyword in lower_message_text]
             has_alert = bool(found_keywords)
             
-            # Salva a mensagem no banco
             new_message = crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient")
 
-            # ### MUDANÇA ### - Envia a nova mensagem para o frontend via WebSocket
             message_dict = {
                 "id": new_message.id,
                 "text": new_message.text,
@@ -170,7 +132,6 @@ async def websocket_endpoint(websocket: WebSocket, patient_id: int):
     await manager.connect(websocket, patient_id)
     try:
         while True:
-            # Mantém a conexão aberta. Pode ser usado para comunicação bidirecional no futuro.
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, patient_id)
@@ -240,8 +201,6 @@ def send_message_to_patient(patient_id: int, message_request: MessageSendRequest
             response = client.post(url, headers=headers, json=data)
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        print(f"Erro ao enviar mensagem para {patient.phone_number}: {e.response.status_code}" )
-        print(f"Detalhe do erro: {e.response.text}")
         raise HTTPException(status_code=500, detail=f"Erro na API do WhatsApp: {e.response.text}")
 
     new_message = crud.create_message(
@@ -251,14 +210,58 @@ def send_message_to_patient(patient_id: int, message_request: MessageSendRequest
         sender="professional", 
         has_alert=False 
     )
-    print(f"Mensagem do profissional para o paciente {patient.id} salva no banco.")
-    
     return {
         "id": new_message.id,
         "text": new_message.text,
         "sender": new_message.sender,
         "timestamp": new_message.timestamp.isoformat()
     }
+
+# --- ENDPOINT DE SUMARIZAÇÃO CORRIGIDO E INCLUÍDO ---
+@app.post("/api/messages/{patient_id}/summarize")
+def summarize_conversation(patient_id: int, db: Session = Depends(get_db)):
+    if not client:
+        raise HTTPException(status_code=503, detail="A funcionalidade de IA não está configurada no servidor.")
+
+    messages = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
+    if not messages:
+        raise HTTPException(status_code=404, detail="Nenhuma mensagem encontrada para este paciente.")
+
+    conversation_text = ""
+    for msg in messages:
+        sender_name = "Profissional" if msg.sender == 'professional' else "Paciente"
+        conversation_text += f"{sender_name}: {msg.text}\n"
+
+    system_prompt = (
+        "Você é um assistente de saúde inteligente. Sua tarefa é resumir a seguinte conversa "
+        "entre um paciente em tratamento e um profissional de saúde. O resumo deve ser conciso, "
+        "útil e focado nos aspectos clínicos e comportamentais."
+    )
+    user_prompt = (
+        "Por favor, resuma a conversa abaixo em bullet points, focando em: "
+        "1. Evolução de sintomas ou queixas. "
+        "2. Adesão ao tratamento (medicamentos, dieta, exercícios). "
+        "3. Efeitos colaterais mencionados. "
+        "4. Estado emocional ou humor geral relatado. "
+        "5. Dados numéricos específicos reportados (peso, pressão, etc.). "
+        "Não invente informações e seja direto ao ponto.\n\n"
+        f"--- CONVERSA ---\n{conversation_text}"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+        summary = response.choices[0].message.content
+        return {"summary": summary}
+    except Exception as e:
+        print(f"Erro na API da OpenAI: {e}")
+        raise HTTPException(status_code=500, detail="Ocorreu um erro ao gerar o resumo.")
+# ----------------------------------------------------
 
 @app.post("/trigger-daily-task")
 async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
@@ -269,7 +272,7 @@ async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
 
 @app.get("/")
 def read_root():
-    return {"status": "API do Cuide.me (Fase 3) está funcionando!"}
+    return {"status": "API do Cuide.me está funcionando!"}
 
 @app.get("/webhook")
 def verify_webhook(request: Request):
