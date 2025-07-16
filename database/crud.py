@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from . import models
 
+# ... (funções existentes get_or_create_patient, create_message, get_all_patients) ...
 def get_or_create_patient(db: Session, phone_number: str):
     """
     Busca um paciente pelo número de telefone. Se não existir, cria um novo.
@@ -13,17 +14,15 @@ def get_or_create_patient(db: Session, phone_number: str):
         db.refresh(patient)
     return patient
 
-# ### FUNÇÃO CORRIGIDA ###
 def create_message(db: Session, patient_id: int, text: str, has_alert: bool, sender: str = "patient"):
     """
     Cria e salva uma nova mensagem no banco de dados.
-    O parâmetro 'sender' agora é aceito. O valor padrão é 'patient'.
     """
     db_message = models.Message(
         patient_id=patient_id,
         text=text,
         has_alert=has_alert,
-        sender=sender  # A linha que usa o novo argumento
+        sender=sender
     )
     db.add(db_message)
     db.commit()
@@ -35,3 +34,16 @@ def get_all_patients(db: Session):
     Retorna todos os pacientes do banco de dados.
     """
     return db.query(models.Patient).all()
+
+
+# ### NOVAS FUNÇÕES CRUD PARA O PROFISSIONAL ###
+def get_professional_by_email(db: Session, email: str):
+    return db.query(models.Professional).filter(models.Professional.email == email).first()
+
+def create_professional(db: Session, email: str, hashed_password: str):
+    db_professional = models.Professional(email=email, hashed_password=hashed_password)
+    db.add(db_professional)
+    db.commit()
+    db.refresh(db_professional)
+    return db_professional
+# ###########################################
