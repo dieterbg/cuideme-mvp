@@ -6,4 +6,8 @@ sqlalchemy
 psycopg2-binary
 alembic
 fastapi-cors
-openai
+google-generativeai
+# ... (bibliotecas existentes)
+google-generativeai
+passlib[bcrypt]
+python-jose[cryptography]
