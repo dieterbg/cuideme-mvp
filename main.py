@@ -1,5 +1,3 @@
-# (Cole aqui a versão completa e correta do main.py que eu forneci na resposta anterior. 
-# É o mesmo código, apenas para garantir que você o tenha.)
 import os
 import json
 import httpx
@@ -7,13 +5,17 @@ from fastapi import FastAPI, Request, HTTPException, Depends, Header, WebSocket,
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 from typing import List, Annotated
-import openai 
+import google.generativeai as genai 
+
+# NOVOS IMPORTS
+from passlib.context import CryptContext
 
 from fastapi.middleware.cors import CORSMiddleware
 from database import crud, models
 from database.database import engine, get_db
 from send_scheduled_messages import run_task
 
+# ... (ConnectionManager e models.Base permanecem os mesmos)
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, list[WebSocket]] = {}
@@ -38,30 +40,71 @@ class ConnectionManager:
 manager = ConnectionManager()
 models.Base.metadata.create_all(bind=engine)
 
+# ... (Variáveis de ambiente e cliente AI permanecem os mesmos)
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 CRON_SECRET = os.getenv("CRON_SECRET")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-if OPENAI_API_KEY:
-    openai.api_key = OPENAI_API_KEY
-    client = openai.OpenAI()
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 else:
-    print("AVISO: Chave da API da OpenAI não encontrada. A funcionalidade de IA estará desativada.")
-    client = None
+    print("AVISO: Chave da API do Google não encontrada. A funcionalidade de IA estará desativada.")
+
+# ### NOVA SEÇÃO DE SEGURANÇA ###
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+# ################################
 
 ALERT_KEYWORDS = ["dor", "febre", "difícil", "não tomei", "sem dormir", "ansioso", "triste"]
-app = FastAPI(title="Cuide.me Backend", description="API para o Sistema de Acompanhamento Inteligente de Pacientes.", version="0.7.0")
 
-origins = ["https://cuideme-painel.onrender.com", "http://localhost:5173"]
-app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(
+    title="Cuide.me Backend",
+    description="API para o Sistema de Acompanhamento Inteligente de Pacientes.",
+    version="0.8.0" # Versão incrementada
+)
 
-class MessageSendRequest(BaseModel): text: str
+# ... (CORS permanece o mesmo)
+origins = [
+    "https://cuideme-painel.onrender.com",
+    "http://localhost:5173",
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ### NOVOS MODELOS PYDANTIC (SCHEMAS) ###
+class ProfessionalCreate(BaseModel):
+    email: str
+    password: str
+
+class ProfessionalResponse(BaseModel):
+    id: int
+    email: str
+    model_config = ConfigDict(from_attributes=True)
+# ######################################
+
+class MessageSendRequest(BaseModel):
+    text: str
 class PatientResponse(BaseModel):
-    id: int; phone_number: str; name: str | None = None; has_alert: bool = False; status: str
+    id: int
+    phone_number: str
+    name: str | None = None
+    has_alert: bool = False
+    status: str
     model_config = ConfigDict(from_attributes=True)
 
+# ... (Função send_whatsapp_message permanece a mesma)
 def send_whatsapp_message(to_number: str, text: str):
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
@@ -76,6 +119,20 @@ def send_whatsapp_message(to_number: str, text: str):
         print(f"Erro ao enviar mensagem para {to_number}: {e.response.status_code}"); print(f"Detalhe do erro: {e.response.text}")
         return False
 
+
+# ### NOVO ENDPOINT DE REGISTRO ###
+@app.post("/auth/register", response_model=ProfessionalResponse, status_code=201)
+def register_professional(professional: ProfessionalCreate, db: Session = Depends(get_db)):
+    db_professional = crud.get_professional_by_email(db, email=professional.email)
+    if db_professional:
+        raise HTTPException(status_code=400, detail="Email já registrado")
+    
+    hashed_password = get_password_hash(professional.password)
+    return crud.create_professional(db=db, email=professional.email, hashed_password=hashed_password)
+# ################################
+
+# ... (Todos os outros endpoints de /webhook até o final permanecem os mesmos)
+# (Cole aqui o restante dos seus endpoints, de /webhook até o final)
 @app.post("/webhook")
 async def handle_webhook(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
@@ -91,12 +148,13 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             new_message = crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient")
             message_dict = { "id": new_message.id, "text": new_message.text, "sender": new_message.sender, "timestamp": new_message.timestamp.isoformat() }
             await manager.broadcast_to_patient_viewers(patient.id, message_dict)
-            if not has_alert and patient.status == 'automatico' and client:
+            if not has_alert and patient.status == 'automatico' and GOOGLE_API_KEY:
                 system_prompt = ("Você é um assistente de saúde. Analise a mensagem de um paciente. Sua tarefa é decidir se uma resposta automática de apoio é apropriada. Responda APENAS com um objeto JSON. Se a mensagem for uma simples atualização, um agradecimento ou uma afirmação positiva, retorne: {\"responder\": true, \"texto_resposta\": \"[uma frase curta de apoio]\"}. Exemplos de frases: 'Obrigado por compartilhar!', 'Entendido, continue assim!', 'Registro feito!'. Se a mensagem for uma pergunta, um pedido de ajuda, uma queixa (mesmo que sutil), ou qualquer coisa que exija atenção humana, retorne: {\"responder\": false}")
                 user_prompt = f"Analise esta mensagem do paciente: \"{message_text}\""
                 try:
-                    response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], response_format={"type": "json_object"})
-                    ai_decision = json.loads(response.choices[0].message.content)
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    response = model.generate_content(prompt) # Corrigido para usar a variável prompt correta
+                    ai_decision = json.loads(response.text)
                     if ai_decision.get("responder") is True and (response_text := ai_decision.get("texto_resposta")):
                         print(f"IA decidiu responder ao paciente {patient.id} com: '{response_text}'")
                         send_whatsapp_message(to_number=patient.phone_number, text=response_text)
@@ -153,20 +211,29 @@ def send_message_to_patient(patient_id: int, message_request: MessageSendRequest
 
 @app.post("/api/messages/{patient_id}/summarize")
 def summarize_conversation(patient_id: int, db: Session = Depends(get_db)):
-    if not client: raise HTTPException(status_code=503, detail="A funcionalidade de IA não está configurada no servidor.")
+    if not GOOGLE_API_KEY: raise HTTPException(status_code=503, detail="A funcionalidade de IA não está configurada no servidor.")
     messages = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
     if not messages: raise HTTPException(status_code=404, detail="Nenhuma mensagem encontrada para este paciente.")
     conversation_text = ""
     for msg in messages:
         sender_name = "Profissional" if msg.sender == 'professional' else "Paciente"
         conversation_text += f"{sender_name}: {msg.text}\n"
-    system_prompt = ("Você é um assistente de saúde inteligente. Sua tarefa é resumir a seguinte conversa entre um paciente em tratamento e um profissional de saúde. O resumo deve ser conciso, útil e focado nos aspectos clínicos e comportamentais.")
-    user_prompt = ("Por favor, resuma a conversa abaixo em bullet points, focando em: 1. Evolução de sintomas ou queixas. 2. Adesão ao tratamento (medicamentos, dieta, exercícios). 3. Efeitos colaterais mencionados. 4. Estado emocional ou humor geral relatado. 5. Dados numéricos específicos reportados (peso, pressão, etc.). Não invente informações e seja direto ao ponto.\n\n" f"--- CONVERSA ---\n{conversation_text}")
+    prompt = ("Você é um assistente de saúde inteligente. Sua tarefa é resumir a seguinte conversa entre um paciente em tratamento e um profissional de saúde para que o profissional possa entender rapidamente o estado do paciente. O resumo deve ser conciso e útil.\n\n"
+        "Por favor, resuma a conversa abaixo em bullet points, focando em: "
+        "1. Evolução de sintomas ou queixas. "
+        "2. Adesão ao tratamento (medicamentos, dieta, exercícios). "
+        "3. Efeitos colaterais mencionados. "
+        "4. Estado emocional ou humor geral relatado. "
+        "5. Dados numéricos específicos reportados (peso, pressão, etc.).\n\n"
+        "Seja direto ao ponto e não invente informações que não estão na conversa.\n\n"
+        f"--- CONVERSA ---\n{conversation_text}"
+        "\n--- RESUMO ---")
     try:
-        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
-        summary = response.choices[0].message.content; return {"summary": summary}
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        summary = response.text; return {"summary": summary}
     except Exception as e:
-        print(f"Erro na API da OpenAI: {e}"); raise HTTPException(status_code=500, detail="Ocorreu um erro ao gerar o resumo.")
+        print(f"Erro na API do Google Gemini: {e}"); raise HTTPException(status_code=500, detail="Ocorreu um erro ao gerar o resumo.")
 
 @app.post("/trigger-daily-task")
 async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
