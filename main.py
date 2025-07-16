@@ -12,7 +12,11 @@ from database import crud, models
 from database.database import engine, get_db
 from send_scheduled_messages import run_task
 
+<<<<<<< HEAD
 # Gerenciador de Conexões WebSocket
+=======
+# ... (ConnectionManager e models.Base permanecem os mesmos)
+>>>>>>> b13924a (automatizar sincronizacao)
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, list[WebSocket]] = {}
@@ -40,14 +44,14 @@ class ConnectionManager:
 manager = ConnectionManager()
 models.Base.metadata.create_all(bind=engine)
 
-# Variáveis de Ambiente
+
+# Variáveis de Ambiente e Cliente OpenAI (sem alterações)
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 CRON_SECRET = os.getenv("CRON_SECRET")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Inicialização do Cliente OpenAI
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
     client = openai.OpenAI()
@@ -60,10 +64,17 @@ ALERT_KEYWORDS = ["dor", "febre", "difícil", "não tomei", "sem dormir", "ansio
 app = FastAPI(
     title="Cuide.me Backend",
     description="API para o Sistema de Acompanhamento Inteligente de Pacientes.",
+<<<<<<< HEAD
     version="0.5.1" # Versão incrementada
 )
 
 # CORS
+=======
+    version="0.7.0" # Versão incrementada
+)
+
+# ... (CORS e Pydantic models permanecem os mesmos)
+>>>>>>> b13924a (automatizar sincronizacao)
 origins = [
     "https://cuideme-painel.onrender.com",
     "http://localhost:5173",
@@ -75,7 +86,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+class MessageSendRequest(BaseModel):
+    text: str
+class PatientResponse(BaseModel):
+    id: int
+    phone_number: str
+    name: str | None = None
+    has_alert: bool = False
+    status: str
+    model_config = ConfigDict(from_attributes=True)
 
+<<<<<<< HEAD
 # Modelos Pydantic
 class MessageSendRequest(BaseModel):
     text: str
@@ -90,6 +111,29 @@ class PatientResponse(BaseModel):
 
 # Endpoints da API
 
+=======
+# ### NOVA FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS ###
+def send_whatsapp_message(to_number: str, text: str):
+    """Envia uma mensagem de texto via API do WhatsApp."""
+    url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    data = {"messaging_product": "whatsapp", "to": to_number, "type": "text", "text": {"body": text}}
+    
+    try:
+        with httpx.Client() as http_client:
+            response = http_client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+        print(f"Mensagem enviada com sucesso para {to_number}.")
+        return True
+    except httpx.HTTPStatusError as e:
+        print(f"Erro ao enviar mensagem para {to_number}: {e.response.status_code}")
+        print(f"Detalhe do erro: {e.response.text}")
+        return False
+# ####################################################
+
+
+# ### WEBHOOK MODIFICADO PARA USAR A IA PARA RESPOSTAS AUTOMÁTICAS ###
+>>>>>>> b13924a (automatizar sincronizacao)
 @app.post("/webhook")
 async def handle_webhook(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
@@ -108,10 +152,12 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
             
             patient = crud.get_or_create_patient(db, phone_number=from_number)
             
+            # 1. Verifica se a mensagem contém um alerta básico (lógica original)
             lower_message_text = message_text.lower()
             found_keywords = [keyword for keyword in ALERT_KEYWORDS if keyword in lower_message_text]
             has_alert = bool(found_keywords)
             
+<<<<<<< HEAD
             new_message = crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient")
 
             message_dict = {
@@ -120,13 +166,54 @@ async def handle_webhook(request: Request, db: Session = Depends(get_db)):
                 "sender": new_message.sender,
                 "timestamp": new_message.timestamp.isoformat()
             }
+=======
+            # 2. Salva a mensagem no banco
+            new_message = crud.create_message(db, patient_id=patient.id, text=message_text, has_alert=has_alert, sender="patient")
+
+            # 3. Envia a nova mensagem para o frontend via WebSocket
+            message_dict = { "id": new_message.id, "text": new_message.text, "sender": new_message.sender, "timestamp": new_message.timestamp.isoformat() }
+>>>>>>> b13924a (automatizar sincronizacao)
             await manager.broadcast_to_patient_viewers(patient.id, message_dict)
+            
+            # 4. ### LÓGICA DE RESPOSTA AUTOMÁTICA ###
+            # Só tenta responder se NÃO for um alerta óbvio e o modo for automático
+            if not has_alert and patient.status == 'automatico' and client:
+                system_prompt = (
+                    "Você é um assistente de saúde. Analise a mensagem de um paciente. "
+                    "Sua tarefa é decidir se uma resposta automática de apoio é apropriada. "
+                    "Responda APENAS com um objeto JSON. "
+                    "Se a mensagem for uma simples atualização, um agradecimento ou uma afirmação positiva, retorne: {\"responder\": true, \"texto_resposta\": \"[uma frase curta de apoio]\"}. Exemplos de frases: 'Obrigado por compartilhar!', 'Entendido, continue assim!', 'Registro feito!'. "
+                    "Se a mensagem for uma pergunta, um pedido de ajuda, uma queixa (mesmo que sutil), ou qualquer coisa que exija atenção humana, retorne: {\"responder\": false}"
+                )
+                user_prompt = f"Analise esta mensagem do paciente: \"{message_text}\""
+
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        response_format={"type": "json_object"} # Força a resposta em JSON
+                    )
+                    ai_decision_str = response.choices[0].message.content
+                    ai_decision = json.loads(ai_decision_str)
+
+                    if ai_decision.get("responder") is True:
+                        response_text = ai_decision.get("texto_resposta")
+                        if response_text:
+                            print(f"IA decidiu responder ao paciente {patient.id} com: '{response_text}'")
+                            send_whatsapp_message(to_number=patient.phone_number, text=response_text)
+                        
+                except Exception as e:
+                    print(f"Erro ao processar resposta da IA: {e}")
             
         return {"status": "ok"}
     except Exception as e:
-        print(f"Erro ao processar a mensagem: {e}")
+        print(f"Erro fatal ao processar o webhook: {e}")
         return {"status": "error", "detail": str(e)}
 
+# ... (WebSocket endpoint e /api/patients permanecem os mesmos)
 @app.websocket("/ws/{patient_id}")
 async def websocket_endpoint(websocket: WebSocket, patient_id: int):
     await manager.connect(websocket, patient_id)
@@ -186,12 +273,15 @@ def release_conversation_control(patient_id: int, db: Session = Depends(get_db))
     db.commit()
     return {"status": "success", "message": "Controle automático reativado."}
 
+
+# ### ENDPOINT DE ENVIO MODIFICADO PARA USAR A FUNÇÃO AUXILIAR ###
 @app.post("/api/messages/send/{patient_id}", status_code=201)
 def send_message_to_patient(patient_id: int, message_request: MessageSendRequest, db: Session = Depends(get_db)):
     patient = db.query(models.Patient).filter(models.Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Paciente não encontrado")
 
+<<<<<<< HEAD
     url = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     data = {"messaging_product": "whatsapp", "to": patient.phone_number, "type": "text", "text": {"body": message_request.text}}
@@ -202,6 +292,10 @@ def send_message_to_patient(patient_id: int, message_request: MessageSendRequest
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=500, detail=f"Erro na API do WhatsApp: {e.response.text}")
+=======
+    if not send_whatsapp_message(to_number=patient.phone_number, text=message_request.text):
+        raise HTTPException(status_code=500, detail="Erro ao enviar mensagem pela API do WhatsApp.")
+>>>>>>> b13924a (automatizar sincronizacao)
 
     new_message = crud.create_message(
         db=db,
@@ -217,21 +311,34 @@ def send_message_to_patient(patient_id: int, message_request: MessageSendRequest
         "timestamp": new_message.timestamp.isoformat()
     }
 
+<<<<<<< HEAD
 # --- ENDPOINT DE SUMARIZAÇÃO CORRIGIDO E INCLUÍDO ---
+=======
+# ... (Endpoint de sumarização e outros finais permanecem os mesmos)
+>>>>>>> b13924a (automatizar sincronizacao)
 @app.post("/api/messages/{patient_id}/summarize")
 def summarize_conversation(patient_id: int, db: Session = Depends(get_db)):
     if not client:
         raise HTTPException(status_code=503, detail="A funcionalidade de IA não está configurada no servidor.")
+<<<<<<< HEAD
 
     messages = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
     if not messages:
         raise HTTPException(status_code=404, detail="Nenhuma mensagem encontrada para este paciente.")
 
+=======
+    messages = db.query(models.Message).filter(models.Message.patient_id == patient_id).order_by(models.Message.timestamp.asc()).all()
+    if not messages:
+        raise HTTPException(status_code=404, detail="Nenhuma mensagem encontrada para este paciente.")
+>>>>>>> b13924a (automatizar sincronizacao)
     conversation_text = ""
     for msg in messages:
         sender_name = "Profissional" if msg.sender == 'professional' else "Paciente"
         conversation_text += f"{sender_name}: {msg.text}\n"
+<<<<<<< HEAD
 
+=======
+>>>>>>> b13924a (automatizar sincronizacao)
     system_prompt = (
         "Você é um assistente de saúde inteligente. Sua tarefa é resumir a seguinte conversa "
         "entre um paciente em tratamento e um profissional de saúde. O resumo deve ser conciso, "
@@ -247,7 +354,10 @@ def summarize_conversation(patient_id: int, db: Session = Depends(get_db)):
         "Não invente informações e seja direto ao ponto.\n\n"
         f"--- CONVERSA ---\n{conversation_text}"
     )
+<<<<<<< HEAD
 
+=======
+>>>>>>> b13924a (automatizar sincronizacao)
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -261,7 +371,10 @@ def summarize_conversation(patient_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Erro na API da OpenAI: {e}")
         raise HTTPException(status_code=500, detail="Ocorreu um erro ao gerar o resumo.")
+<<<<<<< HEAD
 # ----------------------------------------------------
+=======
+>>>>>>> b13924a (automatizar sincronizacao)
 
 @app.post("/trigger-daily-task")
 async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
@@ -273,6 +386,45 @@ async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
 @app.get("/")
 def read_root():
     return {"status": "API do Cuide.me está funcionando!"}
+<<<<<<< HEAD
+=======
+
+@app.get("/webhook")
+def verify_webhook(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return int(challenge)
+    else:
+        raise HTTPException(status_code=403, detail="Verification token mismatch")
+        f"--- CONVERSA ---\n{conversation_text}"
+    )
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
+        summary = response.choices[0].message.content
+        return {"summary": summary}
+    except Exception as e:
+        print(f"Erro na API da OpenAI: {e}")
+        raise HTTPException(status_code=500, detail="Ocorreu um erro ao gerar o resumo.")
+
+@app.post("/trigger-daily-task")
+async def trigger_task(x_cron_secret: Annotated[str | None, Header()] = None):
+    if not CRON_SECRET or x_cron_secret != CRON_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    run_task()
+    return {"status": "Task triggered successfully"}
+
+@app.get("/")
+def read_root():
+    return {"status": "API do Cuide.me está funcionando!"}
+>>>>>>> b13924a (automatizar sincronizacao)
 
 @app.get("/webhook")
 def verify_webhook(request: Request):
